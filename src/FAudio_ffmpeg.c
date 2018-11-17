@@ -41,16 +41,16 @@ typedef struct FAudioFFmpeg
 	AVFrame *av_frame;
 
 	uint32_t encOffset;	/* current position in encoded stream (in bytes) */
-	uint32_t decOffset;	/* current position in decoded stream (in samples) */
+	uint32_t decOffset;	/* current position in decoded stream (in frames) */
 
 	/* buffer used to decode the last frame */
 	size_t paddingBytes;
 	uint8_t *paddingBuffer;
 
 	/* buffer to receive an entire decoded frame */
-	uint32_t convertCapacity;
-	uint32_t convertSamples;
-	uint32_t convertOffset;
+	uint32_t convertCapacity;	/* current potential capacity of the convertCache (in frames) */
+	uint32_t convertFrames;		/* current occupancy of the convertCache (in frames) */
+	uint32_t convertOffset;		/* current read position in the convertCache (in frames) */
 	float *convertCache;
 } FAudioFFmpeg;
 
@@ -154,14 +154,14 @@ void FAudio_FFMPEG_free(FAudioSourceVoice *voice)
 	voice->src.ffmpeg = NULL;
 }
 
-void FAudio_INTERNAL_ResizeConvertCache(FAudioVoice *voice, uint32_t samples)
+void FAudio_INTERNAL_ResizeConvertCache(FAudioVoice *voice, uint32_t frames)
 {
-	if (samples > voice->src.ffmpeg->convertCapacity)
+	if (frames > voice->src.ffmpeg->convertCapacity)
 	{
-		voice->src.ffmpeg->convertCapacity = samples;
+		voice->src.ffmpeg->convertCapacity = frames;
 		voice->src.ffmpeg->convertCache = (float*) voice->audio->pRealloc(
 			voice->src.ffmpeg->convertCache,
-			sizeof(float) * voice->src.ffmpeg->convertCapacity
+			sizeof(float) * frames * voice->src.format->nChannels
 		);
 	}
 }
@@ -171,7 +171,6 @@ void FAudio_INTERNAL_FillConvertCache(FAudioVoice *voice, FAudioBuffer *buffer)
 	FAudioFFmpeg *ffmpeg = voice->src.ffmpeg;
 	AVPacket avpkt = {0};
 	int averr;
-	uint32_t total_samples;
 
 	avpkt.size = voice->src.format->nBlockAlign;
 	avpkt.data = (unsigned char *) buffer->pAudioData + ffmpeg->encOffset;
@@ -237,9 +236,10 @@ void FAudio_INTERNAL_FillConvertCache(FAudioVoice *voice, FAudioBuffer *buffer)
 	}
 
 	/* copy decoded samples to internal buffer, reordering if necessary */
-	total_samples = ffmpeg->av_frame->nb_samples * ffmpeg->av_ctx->channels;
+	ffmpeg->convertFrames = ffmpeg->av_frame->nb_samples;
+	ffmpeg->convertOffset = 0;
 
-	FAudio_INTERNAL_ResizeConvertCache(voice, total_samples);
+	FAudio_INTERNAL_ResizeConvertCache(voice, ffmpeg->convertFrames);
 
 	if (av_sample_fmt_is_planar(ffmpeg->av_ctx->sample_fmt))
 	{
@@ -256,12 +256,9 @@ void FAudio_INTERNAL_FillConvertCache(FAudioVoice *voice, FAudioBuffer *buffer)
 		FAudio_memcpy(
 			ffmpeg->convertCache,
 			ffmpeg->av_frame->data[0],
-			total_samples * sizeof(float)
+			ffmpeg->av_frame->nb_samples * ffmpeg->av_ctx->channels * sizeof(float)
 		);
 	}
-
-	ffmpeg->convertSamples = total_samples;
-	ffmpeg->convertOffset = 0;
 }
 
 void FAudio_INTERNAL_DecodeFFMPEG(
@@ -271,8 +268,8 @@ void FAudio_INTERNAL_DecodeFFMPEG(
 	uint32_t samples
 ) {
 	FAudioFFmpeg *ffmpeg = voice->src.ffmpeg;
-	uint32_t decSampleSize = voice->src.format->nChannels * voice->src.format->wBitsPerSample / 8;
-	uint32_t outSampleSize = voice->src.format->nChannels * sizeof(float);
+	uint32_t decFrameSize = voice->src.format->nChannels * voice->src.format->wBitsPerSample / 8;
+	uint32_t outFrameSize = voice->src.format->nChannels * sizeof(float);
 	uint32_t done = 0, available, todo, cumulative;
 	uint32_t reseek = 0;
 
@@ -284,9 +281,7 @@ void FAudio_INTERNAL_DecodeFFMPEG(
 		 * we simply rewind by a couple samples. Pretty safe if it doesn't
 		 * cross back into the previous decoded block.
 		 */
-		uint32_t delta = (
-			ffmpeg->decOffset - voice->src.curBufferOffset
-			) * voice->src.format->nChannels;
+		uint32_t delta = ffmpeg->decOffset - voice->src.curBufferOffset;
 
 		if (ffmpeg->convertOffset >= delta)
 		{
@@ -309,7 +304,7 @@ void FAudio_INTERNAL_DecodeFFMPEG(
 	if (reseek)
 	{
 		FAudioBufferWMA *bufferWMA = &voice->src.bufferList->bufferWMA;
-		uint32_t byteOffset = voice->src.curBufferOffset * decSampleSize;
+		uint32_t byteOffset = voice->src.curBufferOffset * decFrameSize;
 		uint32_t packetIdx = bufferWMA->PacketCount - 1;
 
 		/* figure out in which encoded packet has this position */
@@ -330,19 +325,19 @@ void FAudio_INTERNAL_DecodeFFMPEG(
 		/* seek to the wanted position in the stream */
 		ffmpeg->encOffset = packetIdx * voice->src.format->nBlockAlign;
 		FAudio_INTERNAL_FillConvertCache(voice, buffer);
-		ffmpeg->convertOffset = (byteOffset - cumulative) / outSampleSize;
+		ffmpeg->convertOffset = (byteOffset - cumulative) / outFrameSize;
 		ffmpeg->decOffset = voice->src.curBufferOffset;
 	}
 
 	while (done < samples)
 	{
 		/* check for available data in decoded cache, refill if necessary */
-		if (ffmpeg->convertOffset >= ffmpeg->convertSamples)
+		if (ffmpeg->convertOffset >= ffmpeg->convertFrames)
 		{
 			FAudio_INTERNAL_FillConvertCache(voice, buffer);
 		}
 
-		available = (ffmpeg->convertSamples - ffmpeg->convertOffset) / voice->src.format->nChannels;
+		available = (ffmpeg->convertFrames - ffmpeg->convertOffset);
 		if (available <= 0)
 		{
 			break;
@@ -351,12 +346,12 @@ void FAudio_INTERNAL_DecodeFFMPEG(
 		todo = FAudio_min(available, samples - done);
 		FAudio_memcpy(
 			decodeCache + (done * voice->src.format->nChannels),
-			ffmpeg->convertCache + ffmpeg->convertOffset,
+			ffmpeg->convertCache + (ffmpeg->convertOffset * voice->src.format->nChannels),
 			todo * voice->src.format->nChannels * sizeof(float)
 		);
 
 		done += todo;
-		ffmpeg->convertOffset += todo * voice->src.format->nChannels;
+		ffmpeg->convertOffset += todo;
 	}
 
 	ffmpeg->decOffset += samples;
