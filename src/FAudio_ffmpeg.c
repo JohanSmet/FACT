@@ -143,6 +143,7 @@ void FAudio_FFMPEG_free(FAudioSourceVoice *voice)
 {
 	FAudioFFmpeg *ffmpeg = voice->src.ffmpeg;
 
+	av_frame_free(&ffmpeg->av_frame);
 	avcodec_close(ffmpeg->av_ctx);
 	av_free(ffmpeg->av_ctx->extradata);
 	av_free(ffmpeg->av_ctx);
