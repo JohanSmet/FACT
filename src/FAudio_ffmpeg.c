@@ -59,6 +59,7 @@ void FAudio_FFMPEG_reset(FAudioSourceVoice *voice)
 	LOG_FUNC_ENTER(voice->audio)
 	voice->src.ffmpeg->encOffset = 0;
 	voice->src.ffmpeg->decOffset = 0;
+	avcodec_flush_buffers(voice->src.ffmpeg->av_ctx);
 	LOG_FUNC_EXIT(voice->audio)
 }
 
@@ -346,7 +347,7 @@ void FAudio_INTERNAL_DecodeFFMPEG(
 		uint32_t byteOffset = voice->src.curBufferOffset * decSampleSize;
 		uint32_t packetIdx = bufferWMA->PacketCount - 1;
 
-		/* figure out in which encoded packet has this position */
+		/* figure out which encoded packet has this position */
 		while (packetIdx > 0 && bufferWMA->pDecodedPacketCumulativeBytes[packetIdx] > byteOffset)
 		{
 			packetIdx -= 1;
@@ -366,6 +367,7 @@ void FAudio_INTERNAL_DecodeFFMPEG(
 		FAudio_INTERNAL_FillConvertCache(voice, buffer);
 		ffmpeg->convertOffset = (byteOffset - cumulative) / outSampleSize;
 		ffmpeg->decOffset = voice->src.curBufferOffset;
+		avcodec_flush_buffers(ffmpeg->av_ctx);
 	}
 
 	while (done < samples)
