@@ -207,6 +207,10 @@ void FAudio_INTERNAL_FillConvertCache(FAudioVoice *voice, FAudioBuffer *buffer)
 	for(;;)
 	{
 		averr = avcodec_receive_frame(ffmpeg->av_ctx, ffmpeg->av_frame);
+		if (averr == AVERROR_EOF)
+		{
+			break;
+		}
 		if (averr == AVERROR(EAGAIN))
 		{
 			/* ffmpeg needs more data to decode */
@@ -215,15 +219,8 @@ void FAudio_INTERNAL_FillConvertCache(FAudioVoice *voice, FAudioBuffer *buffer)
 			if (ffmpeg->encOffset >= buffer->AudioBytes)
 			{
 				/* no more data in this buffer: enter draining mode and have one more go */
-				if (avpkt.data != NULL)
-				{
-					avpkt.data = NULL;
-					avpkt.size = 0;
-				}
-				else
-				{
-					break;
-				}
+				avpkt.data = NULL;
+				avpkt.size = 0;
 			}
 			else if (ffmpeg->encOffset + avpkt.size + AV_INPUT_BUFFER_PADDING_SIZE > buffer->AudioBytes)
 			{
