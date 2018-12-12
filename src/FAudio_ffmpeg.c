@@ -214,11 +214,18 @@ void FAudio_INTERNAL_FillConvertCache(FAudioVoice *voice, FAudioBuffer *buffer)
 
 			if (ffmpeg->encOffset >= buffer->AudioBytes)
 			{
-				/* no more data in this buffer */
-				break;
+				/* no more data in this buffer: enter draining mode and have one more go */
+				if (avpkt.data != NULL)
+				{
+					avpkt.data = NULL;
+					avpkt.size = 0;
+				}
+				else
+				{
+					break;
+				}
 			}
-
-			if (ffmpeg->encOffset + avpkt.size + AV_INPUT_BUFFER_PADDING_SIZE > buffer->AudioBytes)
+			else if (ffmpeg->encOffset + avpkt.size + AV_INPUT_BUFFER_PADDING_SIZE > buffer->AudioBytes)
 			{
 				/* Unfortunately, the FFmpeg API requires that a number of
 				 * extra bytes must be available past the end of the buffer.
@@ -246,8 +253,11 @@ void FAudio_INTERNAL_FillConvertCache(FAudioVoice *voice, FAudioBuffer *buffer)
 				break;
 			}
 
-			ffmpeg->encOffset += avpkt.size;
-			avpkt.data += avpkt.size;
+			if (avpkt.data != NULL)
+			{
+				ffmpeg->encOffset += avpkt.size;
+				avpkt.data += avpkt.size;
+			}
 
 			/* data sent, try receive again */
 			continue;
